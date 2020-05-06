@@ -9,17 +9,23 @@ from lib.pafprocess import pafprocess
 from lib.utils.common import Human, BodyPart, CocoPart, CocoColors, CocoPairsRender
 
 # Heatmap indices to find each limb (joint connection). Eg: limb_type=1 is
-# Neck->LShoulder, so joint_to_limb_heatmap_relationship[1] represents the
+# Neck->LShoulder, so `joint_to_limb_heatmap_relationship[1]` represents the
 # indices of heatmaps to look for joints: neck=1, LShoulder=5
 
-joint_to_limb_heatmap_relationship = [[1, 2], [2, 3], [3, 4], [1, 5], [5, 6], [6, 7], [1, 0]]
+joint2limb_pairs = [
+    [1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10],
+    [1, 11], [11, 12], [12, 13], [1, 0], [0, 14], [14, 16], [0, 15], [15, 17],
+    [2, 16], [5, 17]]
 
 # PAF indices containing the x and y coordinates of the PAF for a given limb.
 # Eg: limb_type=1 is Neck->LShoulder, so
 # PAFneckLShoulder_x=paf_xy_coords_per_limb[1][0] and
 # PAFneckLShoulder_y=paf_xy_coords_per_limb[1][1]
-paf_xy_coords_per_limb = np.arange(14).reshape(7, 2)
-NUM_LIMBS = len(joint_to_limb_heatmap_relationship)
+paf_xy_coords_per_limb = [
+    [12, 13], [20, 21], [14, 15], [16, 17], [22, 23],
+    [24, 25], [0, 1], [2, 3], [4, 5], [6, 7], [8, 9], [10, 11], [28, 29],
+    [30, 31], [34, 35], [32, 33], [36, 37], [18, 19], [26, 27]]
+NUM_LIMBS = len(joint2limb_pairs)
 
 
 def find_peaks(param, img):
@@ -31,11 +37,11 @@ def find_peaks(param, img):
     in the image
     """
 
-    peaks_binary = (maximum_filter(img, footprint=generate_binary_structure(
-        2, 1)) == img) * (img > param)
-    # Note reverse ([::-1]): we return [[x y], [x y]...] instead of [[y x], [y
-    # x]...]
-    return np.array(np.nonzero(peaks_binary)[::-1]).T
+    peaks_binary = (
+       maximum_filter(img, footprint=generate_binary_structure(2, 1)) == img) * (img > param)  # > (H, W)
+    # Note reverse ([::-1]): we return [[x y], [x y]...] instead of [[y x], [y x]...]
+
+    return np.array(np.nonzero(peaks_binary)[::-1]).T  # > (2,1) -> (1,2)
 
 
 def compute_resized_coords(coords, resizeFactor):
@@ -45,8 +51,8 @@ def compute_resized_coords(coords, resizeFactor):
     resizeFactor times bigger.
     E.g.: image of size 3x3 is resized to 6x6 (resizeFactor=2), we'd like to
     know the new coordinates of cell [1,2] -> Function would return [2.5,4.5]
-    :param coords: Coordinates (indices) of a cell in some input array
-    :param resizeFactor: Resize coefficient = shape_dest/shape_source. E.g.:
+    :param `coords`: Coordinates (indices) of a cell in some input array
+    :param `resizeFactor`: Resize coefficient = shape_dest/shape_source. E.g.:
     resizeFactor=2 means the destination array is twice as big as the
     original one
     :return: Coordinates in an array of size
@@ -64,85 +70,92 @@ def compute_resized_coords(coords, resizeFactor):
     return (np.array(coords, dtype=float) + 0.5) * resizeFactor - 0.5
 
 
-def NMS(heatmaps, upsampFactor=1., bool_refine_center=True, bool_gaussian_filt=False, config=None):
+def NMS(heatmaps, upsample_factor=1., bool_refine_center=True, bool_gaussian_filt=False, config=None):
     """
     NonMaximaSuppression: find peaks (local maxima) in a set of grayscale images
-    :param heatmaps: set of grayscale images on which to find local maxima (3d np.array,
+    :param `heatmaps`: set of grayscale images on which to find local maxima (3d np.array,
     with dimensions image_height x image_width x num_heatmaps)
-    :param upsampFactor: Size ratio between CPM heatmap output and the input image size.
+
+    :param `upsampFactor`: Size ratio between CPM heatmap output and the input image size.
     Eg: upsampFactor=16 if original image was 480x640 and heatmaps are 30x40xN
-    :param bool_refine_center: Flag indicating whether:
+
+    :param `bool_refine_center`: Flag indicating whether:
      - False: Simply return the low-res peak found upscaled by upsampFactor (subject to grid-snap)
      - True: (Recommended, very accurate) Upsample a small patch around each low-res peak and
      fine-tune the location of the peak at the resolution of the original input image
-    :param bool_gaussian_filt: Flag indicating whether to apply a 1d-GaussianFilter (smoothing)
+
+    :param `bool_gaussian_filt`: Flag indicating whether to apply a 1d-GaussianFilter (smoothing)
     to each upsampled patch before fine-tuning the location of each peak.
+
     :return: a NUM_JOINTS x 4 np.array where each row represents a joint type (0=nose, 1=neck...)
     and the columns indicate the {x,y} position, the score (probability) and a unique id (counter)
     """
     # MODIFIED BY CARLOS: Instead of upsampling the heatmaps to heatmap_avg and
     # then performing NMS to find peaks, this step can be sped up by ~25-50x by:
-    # (9-10ms [with GaussFilt] or 5-6ms [without GaussFilt] vs 250-280ms on RoG
+    # - 9-10ms [with GaussFilt]
+    # - 5-6ms [without GaussFilt]
+    # - 250-280ms on RoG
     # 1. Perform NMS at (low-res) CPM's output resolution
-    # 1.1. Find peaks using scipy.ndimage.filters.maximum_filter
+    # 1.1. Find peaks using `scipy.ndimage.filters.maximum_filter`
     # 2. Once a peak is found, take a patch of 5x5 centered around the peak, upsample it, and
     # fine-tune the position of the actual maximum.
-    #  '-> That's equivalent to having found the peak on heatmap_avg, but much faster because we only
+    #  '-> That's equivalent to having found the peak on `heatmap_avg`, but much faster because we only
     #      upsample and scan the 5x5 patch instead of the full (e.g.) 480x640
 
     joint_list_per_joint_type = []
     cnt_total_joints = 0
 
-    # For every peak found, win_size specifies how many pixels in each
+    # For every peak found, `win_size` specifies how many pixels in each
     # direction from the peak we take to obtain the patch that will be
-    # upsampled. Eg: win_size=1 -> patch is 3x3; win_size=2 -> 5x5
-    # (for BICUBIC interpolation to be accurate, win_size needs to be >=2!)
+    # upsampled. Eg: `win_size`=1 -> patch is 3x3; `win_size`=2 -> 5x5
+    # (for BICUBIC interpolation to be accurate, `win_size` needs to be >=2!)
     win_size = 2
 
     for joint in range(config.MODEL.NUM_KEYPOINTS):
-        map_orig = heatmaps[:, :, joint]
-        peak_coords = find_peaks(config.TEST.THRESH_HEATMAP, map_orig)
-        peaks = np.zeros((len(peak_coords), 4))
+        map_orig = heatmaps[:, :, joint]  # > (featH, featW)
+        peak_coords = find_peaks(config.TEST.THRESH_HEATMAP, map_orig)  # `thres`: 0.1
+        peaks = np.zeros((len(peak_coords), 4))  # > (#peaks, (x,y,score,peak_id))
         for i, peak in enumerate(peak_coords):
             if bool_refine_center:
                 x_min, y_min = np.maximum(0, peak - win_size)
-                x_max, y_max = np.minimum(
-                    np.array(map_orig.T.shape) - 1, peak + win_size)
+                x_max, y_max = np.minimum(np.array(map_orig.T.shape) - 1, peak + win_size)
 
                 # Take a small patch around each peak and only upsample that
                 # tiny region
-                patch = map_orig[y_min:y_max + 1, x_min:x_max + 1]
-                map_upsamp = cv2.resize(
-                    patch, None, fx=upsampFactor, fy=upsampFactor, interpolation=cv2.INTER_CUBIC)
+                patch = map_orig[y_min:y_max + 1, x_min:x_max + 1]  # (5, 5)
+                map_upsample = cv2.resize(patch,
+                                          None,
+                                          fx=upsample_factor,
+                                          fy=upsample_factor,
+                                          interpolation=cv2.INTER_CUBIC)  # (40, 40)
 
                 # Gaussian filtering takes an average of 0.8ms/peak (and there might be
-                # more than one peak per joint!) -> For now, skip it (it's
-                # accurate enough)
-                map_upsamp = gaussian_filter(
-                    map_upsamp, sigma=3) if bool_gaussian_filt else map_upsamp
+                # more than one peak per joint!) -> NOTE: For now, skip it (it's # accurate enough)
+                # > `map_upsample`: (40, 40)
+                map_upsample = gaussian_filter(map_upsample, sigma=3) if bool_gaussian_filt else map_upsample
 
                 # Obtain the coordinates of the maximum value in the patch
-                location_of_max = np.unravel_index(
-                    map_upsamp.argmax(), map_upsamp.shape)
-                # Remember that peaks indicates [x,y] -> need to reverse it for
-                # [y,x]
-                location_of_patch_center = compute_resized_coords(
-                    peak[::-1] - [y_min, x_min], upsampFactor)
-                # Calculate the offset wrt to the patch center where the actual
-                # maximum is
+                location_of_max = np.unravel_index(map_upsample.argmax(), map_upsample.shape)
+                # Remember that peaks indicates [x,y] -> need to reverse it for [y,x]
+                # `upsample_factor`: 8, this maps to feat coord
+                location_of_patch_center = compute_resized_coords(peak[::-1] - [y_min, x_min], upsample_factor)
+                # Calculate the offset wrt to the patch center where the actual maximum is
+
                 refined_center = (location_of_max - location_of_patch_center)
-                peak_score = map_upsamp[location_of_max]
+                peak_score = map_upsample[location_of_max]
             else:
                 refined_center = [0, 0]
                 # Flip peak coordinates since they are [x,y] instead of [y,x]
                 peak_score = map_orig[tuple(peak[::-1])]
+
             peaks[i, :] = tuple(
-                x for x in compute_resized_coords(peak_coords[i], upsampFactor) + refined_center[::-1]) + (
-                              peak_score, cnt_total_joints)
+                x for x in compute_resized_coords(peak_coords[i], upsample_factor) +
+                refined_center[::-1]
+            ) + (peak_score, cnt_total_joints)
             cnt_total_joints += 1
         joint_list_per_joint_type.append(peaks)
 
-    return joint_list_per_joint_type
+    return joint_list_per_joint_type  # > (#kp_types, (#peaks, (x,y,score,peak_id)))
 
 
 def find_connected_joints(paf_upsamp, joint_list_per_joint_type, num_intermed_pts=10, config=None):
@@ -165,15 +178,17 @@ def find_connected_joints(paf_upsamp, joint_list_per_joint_type, num_intermed_pt
     """
     connected_limbs = []
 
-    # Auxiliary array to access paf_upsamp quickly
-    limb_intermed_coords = np.empty((4, num_intermed_pts), dtype=np.intp)
+    # Auxiliary array to access `paf_upsamp` quickly, `num_intermed_pts`: 10
+    limb_intermed_coords = np.empty((4, num_intermed_pts), dtype=np.intp)  # > (4, 10)
     for limb_type in range(NUM_LIMBS):
-        # List of all joints of type A found, where A is specified by limb_type
+        # > `joint_list_per_joint_type`: (#kp_types, (x,y,score,peak_id))
+        # > `joint2limb_pairs`: (#limb, (joint_src, joint_dst))
+        # List of all joints of type `A` found, where `A` is specified by `limb_type`
         # (eg: a right forearm starts in a right elbow)
-        joints_src = joint_list_per_joint_type[joint_to_limb_heatmap_relationship[limb_type][0]]
-        # List of all joints of type B found, where B is specified by limb_type
+        joints_src = joint_list_per_joint_type[joint2limb_pairs[limb_type][0]]  # > (#peaks, (x,y,score,peak_id))
+        # List of all joints of type `B` found, where `B` is specified by `limb_type`
         # (eg: a right forearm ends in a right wrist)
-        joints_dst = joint_list_per_joint_type[joint_to_limb_heatmap_relationship[limb_type][1]]
+        joints_dst = joint_list_per_joint_type[joint2limb_pairs[limb_type][1]]  # > (#peaks, x,y,score,peak_id))
         # print(joint_to_limb_heatmap_relationship[limb_type][0])
         # print(joint_to_limb_heatmap_relationship[limb_type][1])
         # print(paf_xy_coords_per_limb[limb_type][0])
@@ -184,39 +199,39 @@ def find_connected_joints(paf_upsamp, joint_list_per_joint_type, num_intermed_pt
             connected_limbs.append([])
         else:
             connection_candidates = []
-            # Specify the paf index that contains the x-coord of the paf for
-            # this limb
-            limb_intermed_coords[2, :] = paf_xy_coords_per_limb[limb_type][0]
+            # Specify the paf index that contains the x-coord of the paf for this limb
+            # `limb_intermed_coords`: (4, 10), `paf_xy_coords_per_limb`: (14,) -> (7,2)
+            limb_intermed_coords[2, :] = paf_xy_coords_per_limb[limb_type][0]  # > scalar -> (10,)
             # And the y-coord paf index
-            limb_intermed_coords[3, :] = paf_xy_coords_per_limb[limb_type][1]
+            limb_intermed_coords[3, :] = paf_xy_coords_per_limb[limb_type][1]  # > scalar -> (10,)
             for i, joint_src in enumerate(joints_src):
-                # Try every possible joints_src[i]-joints_dst[j] pair and see
-                # if it's a feasible limb
+                # Try every possible joints_src[i]-joints_dst[j] pair and see if it's a feasible limb
+
                 for j, joint_dst in enumerate(joints_dst):
-                    # Subtract the position of both joints to obtain the
-                    # direction of the potential limb
+                    # Subtract the position of both joints to obtain the direction of the potential limb
                     limb_dir = joint_dst[:2] - joint_src[:2]
-                    # Compute the distance/length of the potential limb (norm
-                    # of limb_dir)
+                    # Compute the distance/length of the potential limb (norm of `limb_dir`)
                     limb_dist = np.sqrt(np.sum(limb_dir ** 2)) + 1e-8
-                    limb_dir = limb_dir / limb_dist  # Normalize limb_dir to be a unit vector
+                    limb_dir = limb_dir / limb_dist  # Normalize `limb_dir` to be a unit vector
 
                     # Linearly distribute num_intermed_pts points from the x
-                    # coordinate of joint_src to the x coordinate of joint_dst
-                    limb_intermed_coords[1, :] = np.round(np.linspace(
-                        joint_src[0], joint_dst[0], num=num_intermed_pts))
-                    limb_intermed_coords[0, :] = np.round(np.linspace(
-                        joint_src[1], joint_dst[1], num=num_intermed_pts))  # Same for the y coordinate
-                    intermed_paf = paf_upsamp[limb_intermed_coords[0, :],
-                                              limb_intermed_coords[1, :], limb_intermed_coords[2:4, :]].T
+                    # coordinate of `joint_src` to the x coordinate of `joint_dst`
+                    limb_intermed_coords[1, :] = np.round(np.linspace(joint_src[0], joint_dst[0], num=num_intermed_pts))  # (10,)
+                    limb_intermed_coords[0, :] = np.round(np.linspace(joint_src[1], joint_dst[1], num=num_intermed_pts))  # Same for the y coordinate
+                    # > `paf_upsamp`: (H, W, 38), TOCHECK: score_mid=paf_avg[..., joint_id]
+                    intermed_paf = paf_upsamp[limb_intermed_coords[0, :],  # > H: (10,)
+                                              limb_intermed_coords[1, :],  # > W: (10,)
+                                              limb_intermed_coords[2:4, :]].T  # > 38: (2, 10) -> (10, 2)
 
-                    score_intermed_pts = intermed_paf.dot(limb_dir)
-                    score_penalizing_long_dist = score_intermed_pts.mean(
-                    ) + min(0.5 * paf_upsamp.shape[0] / limb_dist - 1, 0)
+                    score_intermed_pts = intermed_paf.dot(limb_dir)  # > (10,)
+                    score_penalizing_long_dist = \
+                        score_intermed_pts.mean() + min(0.5 * paf_upsamp.shape[0] / limb_dist - 1, 0)
                     # Criterion 1: At least 80% of the intermediate points have
                     # a score higher than thre2
-                    criterion1 = (np.count_nonzero(
-                        score_intermed_pts > config.TEST.THRESH_PAF) > 0.8 * num_intermed_pts)
+                    criterion1 = (
+                        # > `paf_thre`: 0.05
+                        np.count_nonzero(score_intermed_pts > config.TEST.THRESH_PAF) > 0.8 * num_intermed_pts
+                    )
                     # Criterion 2: Mean score, penalized for large limb
                     # distances (larger than half the image height), is
                     # positive
@@ -224,35 +239,37 @@ def find_connected_joints(paf_upsamp, joint_list_per_joint_type, num_intermed_pt
                     if criterion1 and criterion2:
                         # Last value is the combined paf(+limb_dist) + heatmap
                         # scores of both joints
-                        connection_candidates.append(
-                            [i, j, score_penalizing_long_dist,
-                             score_penalizing_long_dist + joint_src[2] + joint_dst[2]])
+                        connection_candidates.append([
+                            i, j,
+                            score_penalizing_long_dist,  # scalar
+                            score_penalizing_long_dist + joint_src[2] + joint_dst[2]])  # TOCHECK: ??
 
-            # Sort connection candidates based on their
-            # score_penalizing_long_dist
-            connection_candidates = sorted(
-                connection_candidates, key=lambda x: x[2], reverse=True)
+            # Sort connection candidates based on their `score_penalizing_long_dist`
+            # > (#pair, (i,j,score_dist, score_dist+src+dst))
+            connection_candidates = sorted(connection_candidates, key=lambda x: x[2], reverse=True)  # > (#src2dst, 4)
             connections = np.empty((0, 5))
             # There can only be as many limbs as the smallest number of source
-            # or destination joints (eg: only 2 forearms if there's 5 wrists
-            # but 2 elbows)
+            # or destination joints (eg: only 2 forearms if there's 5 wrists but 2 elbows)
+
             max_connections = min(len(joints_src), len(joints_dst))
             # Traverse all potential joint connections (sorted by their score)
             for potential_connection in connection_candidates:
                 i, j, s = potential_connection[0:3]
-                # Make sure joints_src[i] or joints_dst[j] haven't already been
-                # connected to other joints_dst or joints_src
+                # Make sure `joints_src[i]` or `joints_dst[j]` haven't already been
+                # connected to other `joints_dst` or `joints_src`
                 if i not in connections[:, 3] and j not in connections[:, 4]:
                     # [joint_src_id, joint_dst_id, limb_score_penalizing_long_dist, joint_src_index, joint_dst_index]
-                    connections = np.vstack(
-                        [connections, [joints_src[i][3], joints_dst[j][3], s, i, j]])
+                    connections = np.vstack([
+                        connections,
+                        [joints_src[i][3], joints_dst[j][3], s, i, j]
+                    ])  # > (1,5)
                     # Exit if we've already established max_connections
-                    # connections (each joint can't be connected to more than
-                    # one joint)
+                    # connections (each joint can't be connected to more than one joint)
+
                     if len(connections) >= max_connections:
                         break
             connected_limbs.append(connections)
-
+    # > (#limbs, (#joint_connect, (src_peak_id, dst_peak_id, connect_score, joint_src_id, joint_dst_id, limb_len)))
     return connected_limbs
 
 
@@ -267,36 +284,43 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
     # 2nd-to-last column: Overall score of the joints+limbs that belong to this person
     # Last column: Total count of joints found for this person
     """
-    person_to_joint_assoc = []
-
+    person_to_joint_assoc = []  # > (#person, (20))
+    # > `joint_list`: (#kps, (x,y,score,peak_id, kp_type))
+    # > `connected_limbs`:
+    #  (#limbs,
+    #   #joint_connects,
+    #   (src_peak_id, dst_peak_id, connect_score, joint_src_id, joint_dst_id, limb_len)))
     for limb_type in range(NUM_LIMBS):
-        joint_src_type, joint_dst_type = joint_to_limb_heatmap_relationship[limb_type]
+        joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
 
-        for limb_info in connected_limbs[limb_type]:
+        for limb_info in connected_limbs[limb_type]:  # > #joint_connects
+            # > `limb_info`: (6,), `[0]`: src_peak_id, `[1]`: dst_peak_id
             person_assoc_idx = []
             for person, person_limbs in enumerate(person_to_joint_assoc):
-                if person_limbs[joint_src_type] == limb_info[0] or person_limbs[joint_dst_type] == limb_info[1]:
+                # > `person_limbs`: (20,)
+                if person_limbs[joint_src_type] == limb_info[0] or \
+                   person_limbs[joint_dst_type] == limb_info[1]:
                     person_assoc_idx.append(person)
 
             # If one of the joints has been associated to a person, and either
             # the other joint is also associated with the same person or not
             # associated to anyone yet:
             if len(person_assoc_idx) == 1:
-                person_limbs = person_to_joint_assoc[person_assoc_idx[0]]
+                person_limbs = person_to_joint_assoc[person_assoc_idx[0]]  # > (20,)
                 # If the other joint is not associated to anyone yet,
                 if person_limbs[joint_dst_type] != limb_info[1]:
                     # Associate it with the current person
                     person_limbs[joint_dst_type] = limb_info[1]
                     # Increase the number of limbs associated to this person
                     person_limbs[-1] += 1
-                    # And update the total score (+= heatmap score of joint_dst
-                    # + score of connecting joint_src with joint_dst)
-                    person_limbs[-2] += joint_list[limb_info[1]
-                                                       .astype(int), 2] + limb_info[2]
+                    # And update the total score (+= heatmap score of `joint_dst`
+                    # + score of connecting `joint_src` with `joint_dst`)
+                    person_limbs[-2] += joint_list[limb_info[1].astype(int), 2] + limb_info[2]
+
             elif len(person_assoc_idx) == 2:  # if found 2 and disjoint, merge them
-                person1_limbs = person_to_joint_assoc[person_assoc_idx[0]]
-                person2_limbs = person_to_joint_assoc[person_assoc_idx[1]]
-                membership = ((person1_limbs >= 0) & (person2_limbs >= 0))[:-2]
+                person1_limbs = person_to_joint_assoc[person_assoc_idx[0]]  # > (20,)
+                person2_limbs = person_to_joint_assoc[person_assoc_idx[1]]  # > (20,)
+                membership = ((person1_limbs >= 0) & (person2_limbs >= 0))[:-2]  # > (18,)
                 if not membership.any():  # If both people have no same joints connected, merge into a single person
                     # Update which joints are connected
                     person1_limbs[:-2] += (person2_limbs[:-2] + 1)
@@ -310,20 +334,20 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
                 else:  # Same case as len(person_assoc_idx)==1 above
                     person1_limbs[joint_dst_type] = limb_info[1]
                     person1_limbs[-1] += 1
-                    person1_limbs[-2] += joint_list[limb_info[1]
-                                                        .astype(int), 2] + limb_info[2]
+                    person1_limbs[-2] += joint_list[limb_info[1].astype(int), 2] + limb_info[2]
+
             else:  # No person has claimed any of these joints, create a new person
                 # Initialize person info to all -1 (no joint associations)
+                # `row`: (20,) = [-1, -1, ...,-1]
                 row = -1 * np.ones(config.MODEL.NUM_KEYPOINTS + 2)
                 # Store the joint info of the new connection
-                row[joint_src_type] = limb_info[0]
-                row[joint_dst_type] = limb_info[1]
+                row[joint_src_type] = limb_info[0]  # > src_peak_id
+                row[joint_dst_type] = limb_info[1]  # > dst_peak_id
                 # Total count of connected joints for this person: 2
                 row[-1] = 2
-                # Compute overall score: score joint_src + score joint_dst + score connection
-                # {joint_src,joint_dst}
-                row[-2] = sum(joint_list[limb_info[:2].astype(int), 2]
-                              ) + limb_info[2]
+                # Compute overall score: score `joint_src` + `score joint_dst` + `score connection`
+                # {`joint_src`, `joint_dst`}
+                row[-2] = sum(joint_list[limb_info[:2].astype(int), 2]) + limb_info[2]
                 person_to_joint_assoc.append(row)
 
     # Delete people who have very few parts connected
@@ -345,44 +369,60 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
 
 def paf_to_pose(heatmaps, pafs, config):
     # Bottom-up approach:
-    # Step 1: find all joints in the image (organized by joint type: [0]=nose,
-    # [1]=neck...)
-    joint_list_per_joint_type = NMS(heatmaps, upsampFactor=config.MODEL.DOWNSAMPLE, config=config)
+    # `Step 1`: find all joints in the image (organized by joint type: [0]=nose, [1]=neck...)
+    # > `heatmaps`: (H, W, 19), `pafs`: (H, W, 38)
+    joint_list_per_joint_type = NMS(heatmaps, upsample_factor=config.MODEL.DOWNSAMPLE, config=config)
     # joint_list is an unravel'd version of joint_list_per_joint, where we add
     # a 5th column to indicate the joint_type (0=nose, 1=neck...)
-    joint_list = np.array([tuple(peak) + (joint_type,) for joint_type,
-                                                           joint_peaks in enumerate(joint_list_per_joint_type) for peak in joint_peaks])
+    # > `joint_list_per_joint_type`: (#kp_types, (x,y,score,peak_id)) -> (#kps, (x,y,score,peak_id, kp_type))
+    joint_list = np.array([tuple(peak) + (joint_type,)
+                           for joint_type, joint_peaks in enumerate(joint_list_per_joint_type)  # > #kp_types
+                           for peak in joint_peaks])  # > #peaks
 
     # import ipdb
     # ipdb.set_trace()
-    # Step 2: find which joints go together to form limbs (which wrists go
-    # with which elbows)
-    paf_upsamp = cv2.resize(
-        pafs, None, fx=config.MODEL.DOWNSAMPLE, fy=config.MODEL.DOWNSAMPLE, interpolation=cv2.INTER_CUBIC)
-    connected_limbs = find_connected_joints(paf_upsamp, joint_list_per_joint_type,
-                                            config.TEST.NUM_INTERMED_PTS_BETWEEN_KEYPOINTS, config)
+    # `Step 2`: find which joints go together to form limbs (which wrists go with which elbows)
+    paf_upsamp = cv2.resize(pafs, None,
+                            fx=config.MODEL.DOWNSAMPLE,  # `DOWNSAMPLE`: 8
+                            fy=config.MODEL.DOWNSAMPLE,
+                            interpolation=cv2.INTER_CUBIC)
+    connected_limbs = find_connected_joints(
+        paf_upsamp,  # (H, W, 38)
+        joint_list_per_joint_type,  # (#kp, (x,y,score,id,peak_id))
+        config.TEST.NUM_INTERMED_PTS_BETWEEN_KEYPOINTS,  # > 10
+        config)
 
     # Step 3: associate limbs that belong to the same person
-    person_to_joint_assoc = group_limbs_of_same_person(
-        connected_limbs, joint_list, config)
+    # > `joint_list`: (#kps, (x,y,score,peak_id, kp_type))
+    # > `connected_limbs`: (#limbs, (#joint_connect, src_peak_id, dst_peak_id, limb_score_prior, joint_src_id, joint_dst_id, limb_len)))
+    person_to_joint_assoc = group_limbs_of_same_person(connected_limbs, joint_list, config)
 
     return joint_list, person_to_joint_assoc
 
 
 def paf_to_pose_cpp(heatmaps, pafs, config):
     humans = []
-    joint_list_per_joint_type = NMS(heatmaps, upsampFactor=config.MODEL.DOWNSAMPLE, config=config)
+    # > `heatmaps`: (H, W, 19), `DOWNSAMPLE`: 8
+    joint_list_per_joint_type = NMS(heatmaps, upsample_factor=config.MODEL.DOWNSAMPLE, config=config)
 
-    joint_list = np.array(
-        [tuple(peak) + (joint_type,) for joint_type, joint_peaks in enumerate(joint_list_per_joint_type) for peak in
-         joint_peaks]).astype(np.float32)
+    joint_list = np.array([
+        tuple(peak) + (joint_type,)
+        for joint_type, joint_peaks in enumerate(joint_list_per_joint_type)
+        for peak in joint_peaks
+    ]).astype(np.float32)
 
     if joint_list.shape[0] > 0:
         joint_list = np.expand_dims(joint_list, 0)
         paf_upsamp = cv2.resize(
-            pafs, None, fx=config.MODEL.DOWNSAMPLE, fy=config.MODEL.DOWNSAMPLE, interpolation=cv2.INTER_NEAREST)
+            pafs, None,
+            fx=config.MODEL.DOWNSAMPLE,
+            fy=config.MODEL.DOWNSAMPLE,
+            interpolation=cv2.INTER_NEAREST)
         heatmap_upsamp = cv2.resize(
-            heatmaps, None, fx=config.MODEL.DOWNSAMPLE, fy=config.MODEL.DOWNSAMPLE, interpolation=cv2.INTER_NEAREST)
+            heatmaps, None,
+            fx=config.MODEL.DOWNSAMPLE,
+            fy=config.MODEL.DOWNSAMPLE,
+            interpolation=cv2.INTER_NEAREST)
         pafprocess.process_paf(joint_list, heatmap_upsamp, paf_upsamp)
         for human_id in range(pafprocess.get_num_humans()):
             human = Human([])
