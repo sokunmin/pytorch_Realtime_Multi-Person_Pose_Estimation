@@ -176,7 +176,7 @@ class Human:
         y2 = max([part[1] for part in part_coords])
 
         # # ------ Adjust heuristically +
-        # if face points are detcted, adjust y value
+        # if face points are detected, adjust y value
 
         is_nose, part_nose = _include_part(parts, _NOSE)
         is_neck, part_neck = _include_part(parts, _NECK)
@@ -224,6 +224,7 @@ class Human:
     def __repr__(self):
         return self.__str__()
 
+
 def draw_humans(npimg, humans, imgcopy=False):
     if imgcopy:
         npimg = np.copy(npimg)
@@ -249,7 +250,8 @@ def draw_humans(npimg, humans, imgcopy=False):
             cv2.line(npimg, centers[pair[0]], centers[pair[1]], CocoColors[pair_order], 3)
 
     return npimg
-    
+
+
 class BodyPart:
     """
     part_idx : part index(eg. 0 for nose)
@@ -272,6 +274,7 @@ class BodyPart:
 
     def __repr__(self):
         return self.__str__()
+
         
 CocoColors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0], [0, 255, 0],
               [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255],

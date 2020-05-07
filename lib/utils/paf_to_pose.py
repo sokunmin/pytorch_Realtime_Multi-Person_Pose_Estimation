@@ -291,11 +291,11 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
     # > `connected_limbs`:
     #  (#limbs,
     #   #joint_connects,
-    #   (src_peak_id, dst_peak_id, connect_score, joint_src_id, joint_dst_id, limb_len)))
+    #   (src_peak_id, dst_peak_id, connect_score, src_kp_idx, dst_kp_idx, kp_type)))
     for limb_type in range(NUM_LIMBS):
         joint_src_type, joint_dst_type = joint2limb_pairs[limb_type]
 
-        for limb_info in connected_limbs[limb_type]:  # > #joint_connects
+        for limb_info in connected_limbs[limb_type]:  # > #limb_connects
             limb_src_peak_id = limb_info[0]
             limb_dst_peak_id = limb_info[1]
             limb_connect_score = limb_info[2]
@@ -303,8 +303,8 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
             person_assoc_idx = []
             for person, person_limbs in enumerate(person_to_joint_assoc):
                 # > `person_limbs`: (20,)
-                if person_limbs[joint_src_type] == limb_src_peak_id or \
-                   person_limbs[joint_dst_type] == limb_dst_peak_id:
+                if limb_src_peak_id == person_limbs[joint_src_type] or \
+                   limb_dst_peak_id == person_limbs[joint_dst_type]:
                     person_assoc_idx.append(person)
 
             # If one of the joints has been associated to a person, and either
@@ -320,11 +320,12 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
                     person_limbs[-1] += 1
                     # And update the total score (+= heatmap score of `joint_dst`
                     # + score of connecting `joint_src` with `joint_dst`)
-                    person_limbs[-2] += joint_list[limb_info[1].astype(int), 2] + limb_connect_score
+                    person_limbs[-2] += joint_list[limb_dst_peak_id.astype(int), 2] + limb_connect_score
 
             elif len(person_assoc_idx) == 2:  # if found 2 and disjoint, merge them
                 person1_limbs = person_to_joint_assoc[person_assoc_idx[0]]  # > (20,)
                 person2_limbs = person_to_joint_assoc[person_assoc_idx[1]]  # > (20,)
+                # > compare assigned joints between person1 and person2
                 membership = ((person1_limbs >= 0) & (person2_limbs >= 0))[:-2]  # > (18,)
                 if not membership.any():  # If both people have no same joints connected, merge into a single person
                     # Update which joints are connected
@@ -332,10 +333,9 @@ def group_limbs_of_same_person(connected_limbs, joint_list, config):
                     # Update the overall score and total count of joints
                     # connected by summing their counters
                     person1_limbs[-2:] += person2_limbs[-2:]
-                    # Add the score of the current joint connection to the
-                    # overall score
+                    # Add the score of the current joint connection to the overall score
                     person1_limbs[-2] += limb_connect_score
-                    person_to_joint_assoc.pop(person_assoc_idx[1])
+                    person_to_joint_assoc.pop(person_assoc_idx[1])  # delete 2nd person after merging
                 else:  # Same case as len(person_assoc_idx)==1 above
                     person1_limbs[joint_dst_type] = limb_dst_peak_id
                     person1_limbs[-1] += 1
@@ -404,8 +404,7 @@ def paf_to_pose(heatmaps, pafs, config):
     #     pafs=connected_limbs,
     #     configs=config
     # )
-
-    # with open('pickle_example.pickle', 'wb') as f:
+    # with open('a.pkl', 'wb') as f:
     #     pickle.dump(outs, f)
 
     # Step 3: associate limbs that belong to the same person

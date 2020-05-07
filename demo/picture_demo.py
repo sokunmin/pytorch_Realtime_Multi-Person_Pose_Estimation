@@ -34,7 +34,7 @@ model = torch.nn.DataParallel(model).cuda()
 model.float()
 model.eval()
 
-test_image = './readme/p2.jpg'
+test_image = './readme/p3.jpg'
 oriImg = cv2.imread(test_image) # B,G,R order
 shape_dst = np.min(oriImg.shape[0:2])
 
